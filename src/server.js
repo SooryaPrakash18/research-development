@@ -13,11 +13,22 @@ const adminRoutes = require('./routes/admin.routes');
 // Firebase Admin initialization
 if (!admin.apps.length) {
   const projectId = process.env.FIREBASE_PROJECT_ID || 'fxec-rd';
+  const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 
-  admin.initializeApp({
-    credential: admin.credential.applicationDefault(),
-    projectId,
-  });
+  if (serviceAccountJson) {
+    const serviceAccount = JSON.parse(serviceAccountJson);
+
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      projectId,
+    });
+  } else {
+    // Use Application Default Credentials if configured
+    admin.initializeApp({
+      credential: admin.credential.applicationDefault(),
+      projectId,
+    });
+  }
 }
 
 const app = express();
