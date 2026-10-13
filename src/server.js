@@ -1,41 +1,21 @@
+
 require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
-const admin = require('firebase-admin');
 
 const pool = require('./db');
 const documentsRoutes = require('./routes/documents.routes');
 const adminRoutes = require('./routes/admin.routes');
-
-// Firebase Admin initialization
-if (!admin.apps.length) {
-  const projectId = process.env.FIREBASE_PROJECT_ID || 'fxec-rd';
-  const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-
-  if (serviceAccountJson) {
-    const serviceAccount = JSON.parse(serviceAccountJson);
-
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      projectId,
-    });
-  } else {
-    // Use Application Default Credentials if configured
-    admin.initializeApp({
-      credential: admin.credential.applicationDefault(),
-      projectId,
-    });
-  }
-}
+const notificationsRoutes = require('./routes/notifications.routes');
 
 const app = express();
 
 app.disable('x-powered-by');
 
-// Allow local React development and your deployed Vercel frontend
+// Allowed frontend origins
 const allowedOrigins = [
   'http://localhost:3000',
   'https://research-development-iota.vercel.app',
@@ -45,14 +25,12 @@ const allowedOrigins = [
     .filter(Boolean),
 ];
 
-app.use(
-  helmet()
-);
+app.use(helmet());
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests without an Origin header, such as server-to-server requests
+      // Allow requests without Origin, such as server-to-server requests.
       if (!origin || allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
@@ -74,7 +52,7 @@ app.get('/api/health', async (_req, res) => {
   try {
     await pool.query('SELECT 1');
 
-    res.json({
+    return res.json({
       ok: true,
       service: 'fxec-rd-api',
       database: 'connected',
@@ -82,24 +60,42 @@ app.get('/api/health', async (_req, res) => {
   } catch (error) {
     console.error('Database health check failed:', error.message);
 
-    res.status(503).json({
+    return res.status(503).json({
       ok: false,
+      service: 'fxec-rd-api',
       database: 'unavailable',
     });
   }
 });
 
-// API routes
+// Documents API — existing MySQL compatibility layer
 app.use('/api/documents', documentsRoutes);
+
+// Admin API — existing admin routes
 app.use('/api/admin', adminRoutes);
+
+// Notifications API — dedicated MySQL notifications table
+app.use('/api/notifications', notificationsRoutes);
+
+// 404 handler for unknown API routes
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/')) {
+    return res.status(404).json({
+      error: 'API endpoint not found.',
+      code: 'api/not-found',
+    });
+  }
+
+  return next();
+});
 
 // Central error handler
 app.use((err, _req, res, _next) => {
-  console.error(err);
+  console.error('API error:', err);
 
-  const status = err.status || 500;
+  const status = Number(err.status) || 500;
 
-  res.status(status).json({
+  return res.status(status).json({
     error:
       status < 500
         ? err.message
@@ -108,7 +104,7 @@ app.use((err, _req, res, _next) => {
   });
 });
 
-// Render provides PORT automatically
+// Start server
 const port = Number(process.env.PORT || 5000);
 
 app.listen(port, () => {
