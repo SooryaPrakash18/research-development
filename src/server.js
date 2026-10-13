@@ -184,5 +184,5 @@ app.use((err, _req, res, _next) => {
 const port = Number(process.env.PORT || 5000);
 
 app.listen(port, () => {
-  console.log(`FXEC RD API listening on port ${port}`);
+  console.log(`FXEC RD API listening on port ${port} (stats route enabled)`);
 });
