@@ -30,9 +30,7 @@ async function requireAuth(req, res, next) {
       });
     }
 
-    const token = match[1].trim();
-
-    const decoded = jwt.verify(token, getJwtSecret(), {
+    const decoded = jwt.verify(match[1].trim(), getJwtSecret(), {
       algorithms: ['HS256'],
       issuer: 'fxec-rd-api',
       audience: 'fxec-rd-client',
@@ -90,7 +88,7 @@ async function requireAuth(req, res, next) {
 }
 
 function requireSuperAdmin(req, res, next) {
-  if (!req.user || !req.user.email) {
+  if (!req.user?.email) {
     return res.status(401).json({
       error: 'Authentication required.',
       code: 'auth/unauthenticated',
@@ -110,4 +108,6 @@ function requireSuperAdmin(req, res, next) {
 module.exports = {
   requireAuth,
   requireSuperAdmin,
+  getJwtSecret,
+  SUPER_ADMIN_EMAIL,
 };

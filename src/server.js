@@ -7,6 +7,8 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 
 const pool = require('./db');
+
+const authRoutes = require('./routes/auth.routes');
 const documentsRoutes = require('./routes/documents.routes');
 const adminRoutes = require('./routes/admin.routes');
 const notificationsRoutes = require('./routes/notifications.routes');
@@ -15,7 +17,10 @@ const app = express();
 
 app.disable('x-powered-by');
 
-// Allowed frontend origins
+// -----------------------------------------------------------------------------
+// CORS configuration
+// -----------------------------------------------------------------------------
+
 const allowedOrigins = [
   'http://localhost:3000',
   'https://research-development-iota.vercel.app',
@@ -29,13 +34,17 @@ app.use(helmet());
 
 app.use(
   cors({
-    origin: (origin, callback) => {
-      // Allow requests without Origin, such as server-to-server requests.
+    origin(origin, callback) {
+      // Allow server-to-server requests and configured frontend origins.
       if (!origin || allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
 
-      return callback(new Error('Origin not allowed by CORS'));
+      const error = new Error('Origin not allowed by CORS');
+      error.status = 403;
+      error.code = 'cors/origin-not-allowed';
+
+      return callback(error);
     },
     credentials: true,
   })
@@ -44,10 +53,15 @@ app.use(
 app.use(express.json({ limit: '10mb' }));
 
 app.use(
-  morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev')
+  morgan(
+    process.env.NODE_ENV === 'production' ? 'combined' : 'dev'
+  )
 );
 
+// -----------------------------------------------------------------------------
 // Health check
+// -----------------------------------------------------------------------------
+
 app.get('/api/health', async (_req, res) => {
   try {
     await pool.query('SELECT 1');
@@ -68,16 +82,72 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
-// Documents API — existing MySQL compatibility layer
+// -----------------------------------------------------------------------------
+// Public login-page statistics
+// Returns aggregate counts only, not individual user or research documents.
+// -----------------------------------------------------------------------------
+
+app.get('/api/public/stats', async (_req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT collection_name, COUNT(*) AS total
+      FROM documents
+      WHERE collection_name IN ('users', 'publications', 'projects')
+      GROUP BY collection_name
+    `);
+
+    const counts = Object.fromEntries(
+      rows.map((row) => [
+        row.collection_name,
+        Number(row.total),
+      ])
+    );
+
+    return res.json({
+      researchers: counts.users || 0,
+      publications: counts.publications || 0,
+      projects: counts.projects || 0,
+    });
+  } catch (error) {
+    console.error('Statistics query failed:', error.message);
+
+    return res.status(500).json({
+      error: 'Unable to load portal statistics.',
+      code: 'stats/query-failed',
+    });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Google authentication and Node.js JWT session endpoints
+// POST /api/auth/google
+// GET  /api/auth/me
+// -----------------------------------------------------------------------------
+
+app.use('/api/auth', authRoutes);
+
+// -----------------------------------------------------------------------------
+// Protected MySQL document compatibility API
+// -----------------------------------------------------------------------------
+
 app.use('/api/documents', documentsRoutes);
 
-// Admin API — existing admin routes
+// -----------------------------------------------------------------------------
+// Administration API
+// -----------------------------------------------------------------------------
+
 app.use('/api/admin', adminRoutes);
 
-// Notifications API — dedicated MySQL notifications table
+// -----------------------------------------------------------------------------
+// Notifications API
+// -----------------------------------------------------------------------------
+
 app.use('/api/notifications', notificationsRoutes);
 
-// 404 handler for unknown API routes
+// -----------------------------------------------------------------------------
+// Unknown API endpoints
+// -----------------------------------------------------------------------------
+
 app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) {
     return res.status(404).json({
@@ -89,9 +159,12 @@ app.use((req, res, next) => {
   return next();
 });
 
+// -----------------------------------------------------------------------------
 // Central error handler
+// -----------------------------------------------------------------------------
+
 app.use((err, _req, res, _next) => {
-  console.error('API error:', err);
+  console.error('API error:', err.message || err);
 
   const status = Number(err.status) || 500;
 
@@ -104,7 +177,10 @@ app.use((err, _req, res, _next) => {
   });
 });
 
+// -----------------------------------------------------------------------------
 // Start server
+// -----------------------------------------------------------------------------
+
 const port = Number(process.env.PORT || 5000);
 
 app.listen(port, () => {

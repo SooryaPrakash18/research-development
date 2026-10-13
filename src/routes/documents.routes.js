@@ -1,118 +1,452 @@
+
 const express = require('express');
+const crypto = require('crypto');
 const pool = require('../db');
 const { requireAuth } = require('../middleware/auth');
+
 const router = express.Router();
+
+// All document operations require a valid Node.js JWT.
 router.use(requireAuth);
 
-const cleanPath = (v) => String(v || '').split('/').filter(Boolean).join('/');
-const decodePath = (req) => cleanPath(decodeURIComponent(req.params.path || ''));
-const idFromPath = (p) => p.split('/').pop();
-const parentFromPath = (p) => p.split('/').slice(0,-1).join('/');
-const collectionFromPath = (p) => p.split('/').slice(0,-1).pop() || '';
-const decodeValue = (v) => {
-  if (Array.isArray(v)) return v.map(decodeValue);
-  if (v && typeof v === 'object') {
-    if (v.__serverTimestamp) return { __mysqlTimestamp: true, seconds: Math.floor(Date.now()/1000), nanoseconds: (Date.now()%1000)*1e6 };
-    if (v.__mysqlTimestamp) return { __mysqlTimestamp: true, seconds: Number(v.seconds), nanoseconds: Number(v.nanoseconds || 0) };
-    return Object.fromEntries(Object.entries(v).map(([k,x]) => [k, decodeValue(x)]));
+const cleanPath = (value) =>
+  String(value || '')
+    .split('/')
+    .filter(Boolean)
+    .join('/');
+
+// Express decodes route parameters; do not decode them a second time.
+const decodePath = (req) => cleanPath(req.params.path || '');
+
+const idFromPath = (path) => path.split('/').pop();
+
+const parentFromPath = (path) =>
+  path.split('/').slice(0, -1).join('/');
+
+const collectionFromPath = (path) =>
+  path.split('/').slice(0, -1).pop() || '';
+
+const decodeValue = (value) => {
+  if (Array.isArray(value)) {
+    return value.map(decodeValue);
   }
-  return v;
+
+  if (value && typeof value === 'object') {
+    if (value.__serverTimestamp) {
+      const milliseconds = Date.now();
+
+      return {
+        __mysqlTimestamp: true,
+        seconds: Math.floor(milliseconds / 1000),
+        nanoseconds: (milliseconds % 1000) * 1e6,
+      };
+    }
+
+    if (value.__mysqlTimestamp) {
+      return {
+        __mysqlTimestamp: true,
+        seconds: Number(value.seconds),
+        nanoseconds: Number(value.nanoseconds || 0),
+      };
+    }
+
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        decodeValue(item),
+      ])
+    );
+  }
+
+  return value;
 };
-const fieldValue = (obj, field) => String(field || '').split('.').reduce((v,k)=>v == null ? undefined : v[k], obj);
-const equal = (a,b) => JSON.stringify(a) === JSON.stringify(b);
-function matches(row, constraints) {
-  const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
-  for (const c of constraints.filter(x=>x.type==='where')) {
-    const actual = fieldValue(data,c.field); const expected = decodeValue(c.value);
-    switch (c.op) {
-      case '==': if (!equal(actual, expected)) return false; break;
-      case '!=': if (equal(actual, expected)) return false; break;
-      case '>': if (!(actual > expected)) return false; break;
-      case '>=': if (!(actual >= expected)) return false; break;
-      case '<': if (!(actual < expected)) return false; break;
-      case '<=': if (!(actual <= expected)) return false; break;
-      case 'array-contains': if (!Array.isArray(actual) || !actual.some(x=>equal(x,expected))) return false; break;
-      case 'in': if (!Array.isArray(expected) || !expected.some(x=>equal(x,actual))) return false; break;
-      case 'not-in': if (!Array.isArray(expected) || expected.some(x=>equal(x,actual))) return false; break;
-      case 'array-contains-any': if (!Array.isArray(actual) || !Array.isArray(expected) || !actual.some(x=>expected.some(y=>equal(x,y)))) return false; break;
-      default: throw Object.assign(new Error(`Unsupported query operator: ${c.op}`), { status:400 });
+
+const fieldValue = (object, field) =>
+  String(field || '')
+    .split('.')
+    .reduce(
+      (value, key) =>
+        value == null ? undefined : value[key],
+      object
+    );
+
+const comparable = (value) => {
+  if (
+    value &&
+    typeof value === 'object' &&
+    value.__mysqlTimestamp === true
+  ) {
+    return (
+      Number(value.seconds) * 1000 +
+      Number(value.nanoseconds || 0) / 1e6
+    );
+  }
+
+  return value;
+};
+
+const equal = (left, right) =>
+  JSON.stringify(comparable(left)) ===
+  JSON.stringify(comparable(right));
+
+function parseData(value) {
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
+function matches(row, constraints = []) {
+  const data = parseData(row.data);
+
+  for (const constraint of constraints.filter(
+    (item) => item.type === 'where'
+  )) {
+    const actual = fieldValue(data, constraint.field);
+    const expected = decodeValue(constraint.value);
+
+    switch (constraint.op) {
+      case '==':
+        if (!equal(actual, expected)) return false;
+        break;
+
+      case '!=':
+        if (equal(actual, expected)) return false;
+        break;
+
+      case '>':
+        if (!(comparable(actual) > comparable(expected))) return false;
+        break;
+
+      case '>=':
+        if (!(comparable(actual) >= comparable(expected))) return false;
+        break;
+
+      case '<':
+        if (!(comparable(actual) < comparable(expected))) return false;
+        break;
+
+      case '<=':
+        if (!(comparable(actual) <= comparable(expected))) return false;
+        break;
+
+      case 'array-contains':
+        if (
+          !Array.isArray(actual) ||
+          !actual.some((item) => equal(item, expected))
+        ) {
+          return false;
+        }
+        break;
+
+      case 'in':
+        if (
+          !Array.isArray(expected) ||
+          !expected.some((item) => equal(item, actual))
+        ) {
+          return false;
+        }
+        break;
+
+      case 'not-in':
+        if (
+          !Array.isArray(expected) ||
+          expected.some((item) => equal(item, actual))
+        ) {
+          return false;
+        }
+        break;
+
+      case 'array-contains-any':
+        if (
+          !Array.isArray(actual) ||
+          !Array.isArray(expected) ||
+          !actual.some((item) =>
+            expected.some((candidate) => equal(item, candidate))
+          )
+        ) {
+          return false;
+        }
+        break;
+
+      default:
+        throw Object.assign(
+          new Error(`Unsupported query operator: ${constraint.op}`),
+          { status: 400, code: 'documents/unsupported-query-operator' }
+        );
     }
   }
+
   return true;
 }
-function serialize(row) { return { path: row.path, id: row.document_id, data: typeof row.data === 'string' ? JSON.parse(row.data) : row.data }; }
+
+function serialize(row) {
+  return {
+    path: row.path,
+    id: row.document_id,
+    data: parseData(row.data),
+  };
+}
+
 async function findDoc(path) {
-  const [rows] = await pool.execute('SELECT path, document_id, data FROM documents WHERE path = ? LIMIT 1', [path]);
+  const [rows] = await pool.execute(
+    `SELECT path, document_id, data
+     FROM documents
+     WHERE path = ?
+     LIMIT 1`,
+    [path]
+  );
+
   return rows[0] || null;
 }
-router.post('/query', async (req,res,next) => {
+
+// Query a collection or collection group.
+router.post('/query', async (req, res, next) => {
   try {
-    const { path, collectionGroup, constraints = [] } = req.body || {};
-    let rows;
-    if (collectionGroup) {
-      [rows] = await pool.execute('SELECT path, document_id, collection_name, parent_path, data FROM documents WHERE collection_name = ?', [String(collectionGroup)]);
-    } else {
-      const collectionPath = cleanPath(path);
-      if (!collectionPath) return res.status(400).json({ error:'A collection path is required' });
-      [rows] = await pool.execute('SELECT path, document_id, collection_name, parent_path, data FROM documents WHERE parent_path = ?', [collectionPath]);
-    }
-    let filtered = rows.filter(row => matches(row, constraints));
-    const sorts = constraints.filter(x=>x.type==='orderBy');
-    for (const sort of [...sorts].reverse()) {
-      const dir = sort.direction === 'desc' ? -1 : 1;
-      filtered.sort((a,b) => {
-        const av=fieldValue(typeof a.data==='string'?JSON.parse(a.data):a.data,sort.field); const bv=fieldValue(typeof b.data==='string'?JSON.parse(b.data):b.data,sort.field);
-        if (av == null && bv == null) return 0; if (av == null) return -1*dir; if (bv == null) return 1*dir;
-        const aa = av && av.__mysqlTimestamp ? av.seconds*1000+(av.nanoseconds||0)/1e6 : av;
-        const bb = bv && bv.__mysqlTimestamp ? bv.seconds*1000+(bv.nanoseconds||0)/1e6 : bv;
-        return (aa < bb ? -1 : aa > bb ? 1 : 0)*dir;
+    const {
+      path,
+      collectionGroup,
+      constraints = [],
+    } = req.body || {};
+
+    if (!Array.isArray(constraints)) {
+      return res.status(400).json({
+        error: 'Query constraints must be an array.',
+        code: 'documents/invalid-constraints',
       });
     }
-    const limitConstraint = constraints.find(x=>x.type==='limit');
-    if (limitConstraint) filtered = filtered.slice(0, Math.max(0, Number(limitConstraint.count)));
-    res.json({ documents: filtered.map(serialize) });
-  } catch (e) { next(e); }
+
+    let rows;
+
+    if (collectionGroup) {
+      [rows] = await pool.execute(
+        `SELECT path, document_id, collection_name, parent_path, data
+         FROM documents
+         WHERE collection_name = ?`,
+        [String(collectionGroup)]
+      );
+    } else {
+      const collectionPath = cleanPath(path);
+
+      if (!collectionPath) {
+        return res.status(400).json({
+          error: 'A collection path is required.',
+          code: 'documents/missing-collection-path',
+        });
+      }
+
+      [rows] = await pool.execute(
+        `SELECT path, document_id, collection_name, parent_path, data
+         FROM documents
+         WHERE parent_path = ?`,
+        [collectionPath]
+      );
+    }
+
+    let filtered = rows.filter((row) => matches(row, constraints));
+
+    const sortConstraints = constraints.filter(
+      (item) => item.type === 'orderBy'
+    );
+
+    for (const sort of [...sortConstraints].reverse()) {
+      const direction = sort.direction === 'desc' ? -1 : 1;
+
+      filtered.sort((left, right) => {
+        const leftData = parseData(left.data);
+        const rightData = parseData(right.data);
+
+        const a = comparable(fieldValue(leftData, sort.field));
+        const b = comparable(fieldValue(rightData, sort.field));
+
+        if (a == null && b == null) return 0;
+        if (a == null) return -1 * direction;
+        if (b == null) return 1 * direction;
+
+        return (a < b ? -1 : a > b ? 1 : 0) * direction;
+      });
+    }
+
+    const limitConstraint = constraints.find(
+      (item) => item.type === 'limit'
+    );
+
+    if (limitConstraint) {
+      const count = Number(limitConstraint.count);
+
+      if (!Number.isFinite(count) || count < 0) {
+        return res.status(400).json({
+          error: 'Query limit must be a non-negative number.',
+          code: 'documents/invalid-limit',
+        });
+      }
+
+      filtered = filtered.slice(0, Math.floor(count));
+    }
+
+    return res.json({
+      documents: filtered.map(serialize),
+    });
+  } catch (error) {
+    return next(error);
+  }
 });
-router.get('/:path(*)', async (req,res,next) => {
+
+// Read a document.
+router.get('/:path(*)', async (req, res, next) => {
   try {
-    const path = decodePath(req); const row = await findDoc(path);
-    if (!row) return res.json({ document:null });
-    res.json({ document: serialize(row) });
-  } catch(e) { next(e); }
+    const path = decodePath(req);
+    const row = await findDoc(path);
+
+    if (!row) {
+      return res.json({ document: null });
+    }
+
+    return res.json({ document: serialize(row) });
+  } catch (error) {
+    return next(error);
+  }
 });
-router.post('/', async (req,res,next) => {
+
+// Add a document to a collection.
+router.post('/', async (req, res, next) => {
   try {
-    const collectionPath = cleanPath(req.body?.path); if (!collectionPath) return res.status(400).json({error:'A collection path is required'});
-    const id = require('crypto').randomUUID().replace(/-/g,''); const path = `${collectionPath}/${id}`;
+    const collectionPath = cleanPath(req.body?.path);
+
+    if (!collectionPath) {
+      return res.status(400).json({
+        error: 'A collection path is required.',
+        code: 'documents/missing-collection-path',
+      });
+    }
+
+    const id = crypto.randomUUID().replace(/-/g, '');
+    const path = `${collectionPath}/${id}`;
     const data = decodeValue(req.body?.data || {});
-    await pool.execute('INSERT INTO documents (path, document_id, collection_name, parent_path, data) VALUES (?, ?, ?, ?, ?)', [path,id,collectionFromPath(path),parentFromPath(path),JSON.stringify(data)]);
-    res.status(201).json({ path, id });
-  } catch(e) { next(e); }
+
+    await pool.execute(
+      `INSERT INTO documents
+       (path, document_id, collection_name, parent_path, data)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        path,
+        id,
+        collectionFromPath(path),
+        parentFromPath(path),
+        JSON.stringify(data),
+      ]
+    );
+
+    return res.status(201).json({ path, id });
+  } catch (error) {
+    return next(error);
+  }
 });
-router.put('/:path(*)', async (req,res,next) => {
-  const conn = await pool.getConnection();
+
+// Create or replace a document; optionally merge its top-level fields.
+router.put('/:path(*)', async (req, res, next) => {
+  let connection;
+
   try {
-    const path=decodePath(req); const data=decodeValue(req.body?.data || {}); const merge=!!req.body?.merge;
-    await conn.beginTransaction();
-    const [rows]=await conn.execute('SELECT data FROM documents WHERE path=? FOR UPDATE',[path]);
-    const merged=merge && rows.length ? { ...(typeof rows[0].data==='string'?JSON.parse(rows[0].data):rows[0].data), ...data } : data;
-    await conn.execute('INSERT INTO documents (path, document_id, collection_name, parent_path, data) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE data=VALUES(data)', [path,idFromPath(path),collectionFromPath(path),parentFromPath(path),JSON.stringify(merged)]);
-    await conn.commit(); res.json({success:true});
-  } catch(e) { await conn.rollback(); next(e); } finally { conn.release(); }
+    const path = decodePath(req);
+    const data = decodeValue(req.body?.data || {});
+    const merge = Boolean(req.body?.merge);
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const [rows] = await connection.execute(
+      'SELECT data FROM documents WHERE path = ? FOR UPDATE',
+      [path]
+    );
+
+    const previous = rows.length ? parseData(rows[0].data) : {};
+
+    const merged =
+      merge && rows.length
+        ? { ...previous, ...data }
+        : data;
+
+    await connection.execute(
+      `INSERT INTO documents
+       (path, document_id, collection_name, parent_path, data)
+       VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE data = VALUES(data)`,
+      [
+        path,
+        idFromPath(path),
+        collectionFromPath(path),
+        parentFromPath(path),
+        JSON.stringify(merged),
+      ]
+    );
+
+    await connection.commit();
+
+    return res.json({ success: true });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    return next(error);
+  } finally {
+    if (connection) connection.release();
+  }
 });
-router.patch('/:path(*)', async (req,res,next) => {
-  const conn = await pool.getConnection();
+
+// Update existing top-level fields.
+router.patch('/:path(*)', async (req, res, next) => {
+  let connection;
+
   try {
-    const path=decodePath(req); const patch=decodeValue(req.body?.data || {});
-    await conn.beginTransaction(); const [rows]=await conn.execute('SELECT data FROM documents WHERE path=? FOR UPDATE',[path]);
-    if (!rows.length) { await conn.rollback(); return res.status(404).json({error:'Document not found'}); }
-    const old=typeof rows[0].data==='string'?JSON.parse(rows[0].data):rows[0].data;
-    const merged={...old,...patch};
-    await conn.execute('UPDATE documents SET data=? WHERE path=?',[JSON.stringify(merged),path]); await conn.commit(); res.json({success:true});
-  } catch(e) { await conn.rollback(); next(e); } finally { conn.release(); }
+    const path = decodePath(req);
+    const patch = decodeValue(req.body?.data || {});
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const [rows] = await connection.execute(
+      'SELECT data FROM documents WHERE path = ? FOR UPDATE',
+      [path]
+    );
+
+    if (!rows.length) {
+      await connection.rollback();
+
+      return res.status(404).json({
+        error: 'Document not found.',
+        code: 'documents/not-found',
+      });
+    }
+
+    const previous = parseData(rows[0].data);
+    const merged = { ...previous, ...patch };
+
+    await connection.execute(
+      'UPDATE documents SET data = ? WHERE path = ?',
+      [JSON.stringify(merged), path]
+    );
+
+    await connection.commit();
+
+    return res.json({ success: true });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    return next(error);
+  } finally {
+    if (connection) connection.release();
+  }
 });
-router.delete('/:path(*)', async (req,res,next) => {
-  try { const path=decodePath(req); await pool.execute('DELETE FROM documents WHERE path=?',[path]); res.status(204).end(); }
-  catch(e) { next(e); }
+
+// Delete a single document.
+router.delete('/:path(*)', async (req, res, next) => {
+  try {
+    const path = decodePath(req);
+
+    await pool.execute(
+      'DELETE FROM documents WHERE path = ?',
+      [path]
+    );
+
+    return res.status(204).end();
+  } catch (error) {
+    return next(error);
+  }
 });
+
 module.exports = router;
